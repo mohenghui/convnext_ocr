@@ -2,45 +2,55 @@
 from calendar import EPOCH
 from cgi import test
 from re import A
+from statistics import mode
 import torch.optim as optim
 from pyexpat import model
-from matplotlib import transforms
+from torchvision.transforms import transforms
 from sklearn.utils import shuffle
 import torch
+import numpy as np
 from torchtoolbox.transform import Cutout
-from dataset import FontData
+from dataset.dataset import FontData
 from torch.autograd import Variable
 import torch.nn as nn
 from torchtoolbox.tools import mixup_data, mixup_criterion
-from models.convnext import convnext_tiny
+from models.convnext import convnext_tiny,convnext_base
 modellr=1e-4
-BATCH_SIZE=8
+BATCH_SIZE=1024
 EPOCHS=300
+INPUT_SIZE=64
 NUMCLASS=6864
-DEVICE=torch.device("cuda" if torch.cuda.is_avilabele() else "cpu")
+DEVICE=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 train_path="data/train"
-test_path="data/test"
+valid_path="data/valid"
 transform=transforms.Compose([
-    transforms.Resize((224,224)),
+    transforms.Resize((INPUT_SIZE,INPUT_SIZE)),
     Cutout(),
     transforms.ToTensor(),
     transforms.Normalize([0.5],[0.5])
 ])
 transform_test=transforms.Compose([
-    transforms.Resize((224,224)),
+    transforms.Resize((INPUT_SIZE,INPUT_SIZE)),
     transforms.ToTensor(),
     transforms.Normalize([0.5],[0.5])
 ])
 
 dataset_train=FontData(train_path,transforms=transform,train=True)
-dataset_test=FontData(train_path,transforms=transform_test,train=False)
+dataset_valid=FontData(valid_path,transforms=transform_test,train=False)
 
 train_loader=torch.utils.data.DataLoader(dataset_train,batch_size=BATCH_SIZE,shuffle=True)
-test_loader=torch.utils.data.DataLoader(dataset_train,batch_size=BATCH_SIZE,shuffle=False)
+valid_loader=torch.utils.data.DataLoader(dataset_valid,batch_size=BATCH_SIZE,shuffle=False)
 
 #损失函数
 criterion=nn.CrossEntropyLoss()
-model_ft=convnext_tiny(pretrained=True)
+model_ft=convnext_base(pretrained=True)
+model_input=model_ft.downsample_layers[0][0]
+
+model_ft.downsample_layers[0][0]=nn.Sequential(nn.Conv2d(1,3,1,1),
+                                model_input)
+
+# for k,v in model_input.named_modules():   
+#     print(k,"-",v)
 #修改最后一层,in_features得到该层的输入
 num_ftrs=model_ft.head.in_features
 model_ft.head=nn.Linear(num_ftrs,NUMCLASS)#修改成对应层数
@@ -57,6 +67,8 @@ def train(model,device,train_loader,optimizer,epoch):
     total_num=len(train_loader.dataset)#计算总数据量
     print(total_num,len(train_loader))
     for batch_idx,(data,target) in enumerate(train_loader):#序号，数据，标签
+        target=np.array(target).astype(int)
+        target=torch.from_numpy(target)
         data,target=data.to(device,non_blocking=True),target.to(device,non_blocking=True)#并行处理
         data,labels_a,labels_b,lam=mixup_data(data,target,alpha) #将两个字何在一起
         optimizer.zero_grad()
@@ -73,15 +85,15 @@ def train(model,device,train_loader,optimizer,epoch):
     print("epoch:{},loss:{}".format(epoch,ave_loss))
 ACC=0
 #验证
-def val(model,device,test_loader,epoch):
+def val(model,device,valid_loader,epoch):
     global ACC
     model.eval()#不做参数更新
     test_loss=0
     correct=0
-    total_num=len(test_loader.dataset)
-    print(total_num,len(test_loader))#总图片个数，需要迭代的次数
+    total_num=len(valid_loader.dataset)
+    print(total_num,len(valid_loader))#总图片个数，需要迭代的次数
     with torch.no_grad():
-        for data,target in test_loader:
+        for data,target in valid_loader:
             data,target=Variable(data).to(device),Variable(target).to(device)
             output=model(data)
             loss=criterion(output,target)
@@ -91,9 +103,9 @@ def val(model,device,test_loader,epoch):
             test_loss+=print_loss #累计损失
         correct=correct.data.item()
         acc=correct/total_num #计算出正确率
-        avgloss=test_loss/len(test_loader)
+        avgloss=test_loss/len(valid_loader)
         print('\nVal set: Average loss:{:.4f},Accuracy: {}/{} ({:.0f}%)\n'.format
-        (avgloss,correct,len(test_loader.dataset),100*acc))
+        (avgloss,correct,len(valid_loader.dataset),100*acc))
         if acc>ACC: #如果正确率比之前的正确率还大就保存模型
             torch.save(model_ft,"model_"+str(epoch)+"_"+str(round(acc,3))+'.pth')
             ACC=acc
@@ -101,5 +113,5 @@ def val(model,device,test_loader,epoch):
 for epoch in range(1,EPOCHS+1):
     train(model_ft,DEVICE,train_loader,optimizer,epoch)
     cosine_schedule.step()
-    val(model_ft,DEVICE,test_loader)
+    val(model_ft,DEVICE,valid_loader)
     
